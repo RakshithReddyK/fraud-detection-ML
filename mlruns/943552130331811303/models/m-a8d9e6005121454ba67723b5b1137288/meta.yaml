@@ -1,0 +1,10 @@
+artifact_location: file:///Users/rakshithreddykondra/fraud-detection/mlruns/943552130331811303/models/m-a8d9e6005121454ba67723b5b1137288/artifacts
+creation_timestamp: 1761147279144
+experiment_id: '943552130331811303'
+last_updated_timestamp: 1761147280552
+model_id: m-a8d9e6005121454ba67723b5b1137288
+model_type: null
+name: model
+source_run_id: 3f3902f2c4274dfd86c7353f95c8bbf8
+status: 2
+status_message: null

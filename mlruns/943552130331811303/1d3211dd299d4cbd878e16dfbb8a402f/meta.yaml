@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/rakshithreddykondra/fraud-detection/mlruns/943552130331811303/1d3211dd299d4cbd878e16dfbb8a402f/artifacts
+end_time: 1761147191568
+entry_point_name: ''
+experiment_id: '943552130331811303'
+lifecycle_stage: active
+run_id: 1d3211dd299d4cbd878e16dfbb8a402f
+run_name: efficient-mare-574
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1761147191546
+status: 4
+tags: []
+user_id: rakshithreddykondra
