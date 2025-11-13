@@ -104,12 +104,12 @@ Loaded 50000 transactions with 2.15% fraud rate
 (AUC and fraud rate will vary based on generator settings.)
 ## 🎯 Why This Project Matters
 This project showcases real-world ML engineering practices:
-Data generation + model training flow
-Modular architecture
-Single-entrypoint automation
-Proper metric reporting (AUC)
-Model artifact management
-Production-style folder layout
+* Data generation + model training flow
+* Modular architecture
+* Single-entrypoint automation
+* Proper metric reporting (AUC)
+* Model artifact management
+* Production-style folder layout
 ## 🚀 Future Enhancements
 You can extend this project with:
 * FastAPI model-serving API
