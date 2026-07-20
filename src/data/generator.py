@@ -1,7 +1,11 @@
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
+import logging
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
 
 class FraudDataGenerator:
     def __init__(self, n_samples=10000, target_rate=0.03, seed=42):
@@ -10,7 +14,9 @@ class FraudDataGenerator:
         self.rng = np.random.default_rng(seed)
 
     def generate(self):
-        # Generate realistic transaction data
+        # Generate realistic transaction data. These columns are also the
+        # features the model trains on (see FeatureEngineer), so none of
+        # them may deterministically define the label below.
         data = {
             "amount": self.rng.lognormal(mean=3.5, sigma=1.2, size=self.n_samples),
             "merchant_risk_score": self.rng.beta(2, 5, self.n_samples),
@@ -22,15 +28,38 @@ class FraudDataGenerator:
         }
         df = pd.DataFrame(data)
 
-        # Heuristic fraud probability
-        fraud_probability = (
-            (df["amount"] > df["amount"].quantile(0.95)) * 0.3
-            + (df["merchant_risk_score"] > 0.7) * 0.4
-            + (df["hour_of_day"].between(0, 6)) * 0.2
-            + (df["num_transactions_today"] > 10) * 0.3
+        # --- Label generation, deliberately decoupled from the feature set ---
+        # Real fraud is driven mostly by signals we don't expose as model
+        # features (compromised-card lists, device/network graph anomalies,
+        # fraud rings, etc.). To avoid baking a trivial, perfectly-learnable
+        # rule into the labels (label leakage), we:
+        #   1) generate latent/hidden variables that are NEVER added to `df`
+        #      and therefore never seen by the model, and give them the
+        #      dominant weight in the label;
+        #   2) let the observed columns contribute only a weak, noisy signal
+        #      via a logistic link (not hard thresholds a tree can memorize
+        #      one-for-one);
+        #   3) add independent random noise on top.
+        # This keeps the observed features *informative* (a good model should
+        # still beat random guessing) without letting them *determine* the
+        # label, which is what caused unrealistically high AUC before.
+        latent_fraud_ring = self.rng.choice(
+            [0, 1], self.n_samples, p=[1 - self.target_rate, self.target_rate]
         )
+        latent_risk = self.rng.normal(0, 1, self.n_samples)
 
-        df["is_fraud"] = (fraud_probability > self.rng.random(self.n_samples)).astype(int)
+        fraud_logit = (
+            -4.8
+            + 2.8 * (df["amount"] > df["amount"].quantile(0.95))
+            + 3.0 * (df["merchant_risk_score"] > 0.7)
+            + 1.6 * df["hour_of_day"].between(0, 6)
+            + 1.8 * (df["num_transactions_today"] > 10)
+            + 1.0 * latent_fraud_ring
+            + 0.25 * latent_risk
+            + self.rng.normal(0, 0.25, self.n_samples)
+        )
+        fraud_probability = 1.0 / (1.0 + np.exp(-fraud_logit))
+        df["is_fraud"] = (self.rng.random(self.n_samples) < fraud_probability).astype(int)
 
         # Adjust to target fraud rate (~3%)
         target_fraud = int(round(self.n_samples * self.target_rate))
@@ -54,7 +83,9 @@ class FraudDataGenerator:
 
         return df
 
+
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     generator = FraudDataGenerator(n_samples=50000, target_rate=0.03, seed=42)
     df = generator.generate()
 
@@ -62,4 +93,5 @@ if __name__ == "__main__":
     Path("data").mkdir(parents=True, exist_ok=True)
 
     df.to_csv("data/transactions.csv", index=False)
-    print(f"Generated {len(df)} transactions with {df['is_fraud'].mean():.2%} fraud rate")
+    fraud_rate_pct = df["is_fraud"].mean() * 100
+    logger.info("Generated %d transactions with %.2f%% fraud rate", len(df), fraud_rate_pct)

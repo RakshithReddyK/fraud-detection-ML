@@ -1,20 +1,25 @@
 from __future__ import annotations
 
-import os
-import json
 import hashlib
+import json
+import logging
+import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 
+import joblib
 import numpy as np
 import pandas as pd
-import joblib
 import redis
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger(__name__)
 
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 MODEL_VERSION = os.getenv("MODEL_VERSION", "1.0.0")
@@ -27,6 +32,44 @@ model = None
 feature_engineer = None
 feature_columns: Optional[List[str]] = None
 redis_client: Optional[redis.Redis] = None
+
+
+class _ServingMetrics:
+    """Small in-process counter for the /metrics endpoint.
+
+    Good enough for a single-process portfolio deployment; for multi-worker
+    or multi-instance production use this would be replaced with a
+    Prometheus client (or similar) exporting shared counters.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.total_predictions = 0
+        self.cache_hits = 0
+        self.total_latency_ms = 0.0
+        self.started_at = time.time()
+
+    def record_prediction(self, latency_ms: float, cache_hit: bool) -> None:
+        with self._lock:
+            self.total_predictions += 1
+            self.total_latency_ms += latency_ms
+            if cache_hit:
+                self.cache_hits += 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            total = self.total_predictions
+            avg_latency = (self.total_latency_ms / total) if total else 0.0
+            cache_hit_rate = (self.cache_hits / total) if total else 0.0
+            return {
+                "total_predictions": total,
+                "avg_latency_ms": round(avg_latency, 3),
+                "cache_hit_rate": round(cache_hit_rate, 4),
+                "uptime_seconds": round(time.time() - self.started_at, 1),
+            }
+
+
+serving_metrics = _ServingMetrics()
 
 
 # --------------------------
@@ -56,15 +99,18 @@ class PredictionResponse(BaseModel):
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _ensure_model_loaded():
     if model is None or feature_engineer is None or not feature_columns:
         raise HTTPException(status_code=503, detail="Model not loaded. Try again shortly.")
+
 
 def _sorted_json_from_model(m: BaseModel) -> str:
     """Stable JSON for cache keys (sorted keys)."""
     d = m.model_dump()
     # hour_of_day and other ints must remain ints; ensure no numpy types sneak in
     return json.dumps(d, sort_keys=True, separators=(",", ":"))
+
 
 def _to_float32(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -111,13 +157,14 @@ def load_artifacts():
             except Exception:
                 redis_client = None
 
-        print(
-            f"[startup] Model/FE loaded. features={len(feature_columns)} | "
-            f"redis={'on' if redis_client else 'off'}"
+        logger.info(
+            "Model/FE loaded. features=%d | redis=%s",
+            len(feature_columns),
+            "on" if redis_client else "off",
         )
     except Exception as e:
         # Keep app up for /health, but indicate model not ready
-        print(f"[startup] ERROR: {e}")
+        logger.error("Startup failed: %s", e)
         model = None
         feature_engineer = None
         feature_columns = None
@@ -131,15 +178,18 @@ def load_artifacts():
 def root():
     return {"app": app.title, "version": APP_VERSION, "model_version": MODEL_VERSION}
 
+
 @app.get("/health")
 def health_check():
+    model_loaded = model is not None and feature_engineer is not None and bool(feature_columns)
     return {
         "status": "healthy",
-        "model_loaded": model is not None and feature_engineer is not None and bool(feature_columns),
+        "model_loaded": model_loaded,
         "n_features": len(feature_columns) if feature_columns else 0,
         "cache_available": redis_client is not None,
         "timestamp": _utc_now_iso(),
     }
+
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_fraud(transaction: TransactionRequest):
@@ -147,7 +197,6 @@ async def predict_fraud(transaction: TransactionRequest):
     start = time.perf_counter()
 
     # Cache (stable key)
-    response_json = None
     cache_key = None
     try:
         if redis_client:
@@ -157,6 +206,8 @@ async def predict_fraud(transaction: TransactionRequest):
             if cached:
                 # Validate JSON → model (ensures schema correctness)
                 parsed = PredictionResponse.model_validate_json(cached)
+                latency_ms = (time.perf_counter() - start) * 1000.0
+                serving_metrics.record_prediction(latency_ms, cache_hit=True)
                 return parsed
     except Exception:
         # Cache errors should not affect prediction path
@@ -195,6 +246,7 @@ async def predict_fraud(transaction: TransactionRequest):
         model_version=MODEL_VERSION,
         timestamp=_utc_now_iso(),
     )
+    serving_metrics.record_prediction(latency_ms, cache_hit=False)
 
     # Write-through cache (best-effort)
     try:
@@ -208,13 +260,17 @@ async def predict_fraud(transaction: TransactionRequest):
 
 @app.get("/metrics")
 def get_metrics():
-    # Stub; wire to your monitoring/MLflow/prom exporter in prod
+    # Real, process-local serving metrics (see _ServingMetrics). For a
+    # multi-worker/multi-instance deployment, replace with a Prometheus
+    # client (or push to MLflow/your APM) so counters are aggregated
+    # across processes instead of living per-worker.
     try:
+        snapshot = serving_metrics.snapshot()
         return {
-            "total_predictions": None,  # TODO: replace with a counter
-            "avg_latency_ms": None,     # TODO: replace with actual histogram/summary
-            "cache_hit_rate": None,     # TODO: compute from redis stats
-            "fraud_detection_rate": 0.03,
+            **snapshot,
+            "model_version": MODEL_VERSION,
+            "model_loaded": model is not None,
+            "cache_available": redis_client is not None,
             "timestamp": _utc_now_iso(),
         }
     except Exception as e:

@@ -1,6 +1,8 @@
-import pandas as pd
-import numpy as np
 from typing import Dict, Iterable
+
+import numpy as np
+import pandas as pd
+
 
 class FeatureEngineer:
     REQUIRED_COLS: Iterable[str] = (
@@ -52,26 +54,20 @@ class FeatureEngineer:
 
         # Amount features
         out["amount_z_score"] = (
-            (out["amount"] - self.feature_stats["amount_mean"])
-            / self.feature_stats["amount_std"]
-        )
+            out["amount"] - self.feature_stats["amount_mean"]
+        ) / self.feature_stats["amount_std"]
         out["amount_log"] = np.log1p(out["amount"].clip(lower=0))
 
         # Risk combinations
         out["combined_risk"] = out["merchant_risk_score"] * out["location_risk"]
         out["high_amount_late_night"] = (
-            (out["amount"] > 500)
-            & (out["hour_of_day"].between(0, 6, inclusive="both"))
+            (out["amount"] > 500) & (out["hour_of_day"].between(0, 6, inclusive="both"))
         ).astype(int)
 
         # Time features
         # Wraparound night: 22–23 OR 0–6
-        out["is_night"] = (
-            (out["hour_of_day"] >= 22) | (out["hour_of_day"] <= 6)
-        ).astype(int)
-        out["is_business_hours"] = out["hour_of_day"].between(
-            9, 17, inclusive="both"
-        ).astype(int)
+        out["is_night"] = ((out["hour_of_day"] >= 22) | (out["hour_of_day"] <= 6)).astype(int)
+        out["is_business_hours"] = out["hour_of_day"].between(9, 17, inclusive="both").astype(int)
 
         # Velocity features
         out["high_velocity"] = (out["num_transactions_today"] > 5).astype(int)

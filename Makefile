@@ -1,4 +1,4 @@
-.PHONY: setup train api test clean
+.PHONY: setup train api test lint docker-build docker-run clean
 
 setup:
 	@echo "Installing dependencies..."
@@ -17,6 +17,17 @@ api:
 test:
 	@echo "Running tests..."
 	poetry run pytest tests/ -v
+
+lint:
+	@echo "Linting..."
+	poetry run ruff check .
+	poetry run black --check .
+
+docker-build:
+	docker build -t fraud-detector:latest .
+
+docker-run:
+	docker run -p 8000:8000 fraud-detector:latest
 
 clean:
 	rm -rf __pycache__ .pytest_cache
