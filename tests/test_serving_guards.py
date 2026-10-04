@@ -49,6 +49,19 @@ def test_invalid_transactions(app_with_artifacts, field, value):
         assert c.post("/predict", json={**TX, field: value}).status_code == 422
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_json_returns_validation_error(app_with_artifacts, value):
+    with TestClient(app_with_artifacts) as c:
+        response = c.post(
+            "/predict",
+            content=json.dumps({**TX, "amount": value}),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", "amount"]
+        assert "input" not in response.json()["detail"][0]
+
+
 def test_unavailable_redis_keeps_model_ready(app_with_artifacts, monkeypatch):
     import redis
 

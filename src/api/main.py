@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import redis
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -33,6 +35,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Fraud Detection API", version=APP_VERSION, lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request, exc):
+    # Do not echo request values. Non-standard NaN/Infinity JSON values would
+    # otherwise make the validation error itself fail JSON serialization.
+    errors = [{key: error[key] for key in ("loc", "msg", "type")} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 
 # Global state (initialized at startup)
 model = None
