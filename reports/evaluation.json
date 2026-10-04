@@ -1,0 +1,68 @@
+{
+  "dataset": "FraudDataGenerator synthetic transactions",
+  "model_type": "xgboost",
+  "random_state": 42,
+  "train_rows": 40000,
+  "test_rows": 10000,
+  "test_prevalence": 0.03,
+  "roc_auc": 0.7522692439862543,
+  "average_precision": 0.14702639539967463,
+  "baseline_roc_auc": 0.5,
+  "baseline_average_precision": 0.03,
+  "classification_at_0_5": {
+    "0": {
+      "precision": 0.9846075562905483,
+      "recall": 0.797938144329897,
+      "f1-score": 0.8814987756961449,
+      "support": 9700.0
+    },
+    "1": {
+      "precision": 0.08368396446937822,
+      "recall": 0.5966666666666667,
+      "f1-score": 0.14678146781467816,
+      "support": 300.0
+    },
+    "accuracy": 0.7919,
+    "macro avg": {
+      "precision": 0.5341457603799633,
+      "recall": 0.6973024054982818,
+      "f1-score": 0.5141401217554116,
+      "support": 10000.0
+    },
+    "weighted avg": {
+      "precision": 0.9575798485359132,
+      "recall": 0.7919,
+      "f1-score": 0.8594572564597008,
+      "support": 10000.0
+    }
+  },
+  "threshold": 0.5,
+  "features": [
+    "amount",
+    "merchant_risk_score",
+    "days_since_last_transaction",
+    "hour_of_day",
+    "is_weekend",
+    "num_transactions_today",
+    "location_risk",
+    "amount_z_score",
+    "amount_log",
+    "combined_risk",
+    "high_amount_late_night",
+    "is_night",
+    "is_business_hours",
+    "high_velocity"
+  ],
+  "feature_statistics_fit_on": "training_rows_only",
+  "brier_score": 0.1332289539847222,
+  "generator_seed": 42,
+  "rows": 50000,
+  "python": "3.12.14",
+  "versions": {
+    "numpy": "2.3.4",
+    "pandas": "2.3.3",
+    "scikit-learn": "1.7.2",
+    "xgboost": "3.1.0"
+  },
+  "scope": "Synthetic holdout; not real-world fraud performance. No calibration or subgroup audit."
+}

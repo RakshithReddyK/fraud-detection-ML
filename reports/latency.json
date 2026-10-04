@@ -1,0 +1,23 @@
+{
+  "transport": "loopback HTTP, persistent client, one Uvicorn worker",
+  "concurrency": 1,
+  "warmup_per_endpoint": 5,
+  "python": "3.12.14",
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+  "cpu_count": 9,
+  "provider_calls": 0,
+  "provider_cost_usd": 0,
+  "model": {
+    "status": "ready",
+    "model_version": "ffaff12b5d00247e"
+  },
+  "results": {
+    "/predict": {
+      "requests": 100,
+      "p50_ms": 5.491462000009051,
+      "p95_ms": 6.943572999944081,
+      "max_ms": 8.266512000091097
+    }
+  },
+  "scope": "Synthetic trained model, repeated transaction, cache disabled; not a production load benchmark"
+}
