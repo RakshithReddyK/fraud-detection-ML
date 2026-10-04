@@ -1,8 +1,11 @@
+import json
 import logging
-import os
+from pathlib import Path
 
 import joblib
+import numpy as np
 import xgboost as xgb
+from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     average_precision_score,
@@ -15,7 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class FraudModel:
-    def __init__(self, model_type="xgboost", random_state=42):
+    def __init__(
+        self,
+        model_type="xgboost",
+        random_state=42,
+        models_dir="models",
+        reports_dir="reports",
+        track_mlflow=True,
+    ):
+        if model_type not in {"xgboost", "random_forest"}:
+            raise ValueError("Unsupported model_type")
+        self.models_dir = Path(models_dir)
+        self.reports_dir = Path(reports_dir)
+        self.track_mlflow = track_mlflow
+        self.metrics = {}
         self.model_type = model_type
         self.random_state = random_state
         self.model = None
@@ -24,6 +40,8 @@ class FraudModel:
 
     def train(self, df):
         try:
+            if not self.track_mlflow:
+                raise ImportError("MLflow disabled for this run")
             # Import MLflow but don't fail if not configured
             import mlflow
             import mlflow.sklearn
@@ -41,20 +59,17 @@ class FraudModel:
             # Feature engineering
             from src.features.engineer import FeatureEngineer
 
-            self.feature_engineer = FeatureEngineer()
-            df_features = self.feature_engineer.fit_transform(df)
-
-            # Prepare data
-            target = "is_fraud"
-            exclude_cols = [target]
-            self.feature_columns = [col for col in df_features.columns if col not in exclude_cols]
-
-            X = df_features[self.feature_columns]
-            y = df_features[target]
-
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=self.random_state, stratify=y
+            # Split raw rows first. No held-out row may affect fitted feature statistics.
+            train_df, test_df = train_test_split(
+                df, test_size=0.2, random_state=self.random_state, stratify=df["is_fraud"]
             )
+            self.feature_engineer = FeatureEngineer()
+            raw_train = train_df.drop(columns=["is_fraud"])
+            raw_test = test_df.drop(columns=["is_fraud"])
+            X_train = self.feature_engineer.fit_transform(raw_train)
+            X_test = self.feature_engineer.transform(raw_test)
+            self.feature_columns = list(X_train.columns)
+            y_train, y_test = train_df["is_fraud"], test_df["is_fraud"]
 
             logger.info("Training set: %d samples", len(X_train))
             logger.info("Test set: %d samples", len(X_test))
@@ -104,6 +119,34 @@ class FraudModel:
             # is more informative here since it focuses on the minority class.
             pr_auc_score = average_precision_score(y_test, y_pred_proba)
 
+            baseline = DummyClassifier(strategy="prior").fit(X_train, y_train)
+            baseline_proba = baseline.predict_proba(X_test)[:, 1]
+            self.metrics = {
+                "dataset": "caller supplied; see run metadata for provenance",
+                "model_type": self.model_type,
+                "random_state": self.random_state,
+                "train_rows": len(X_train),
+                "test_rows": len(X_test),
+                "test_prevalence": float(y_test.mean()),
+                "roc_auc": float(auc_score),
+                "average_precision": float(pr_auc_score),
+                "baseline_roc_auc": float(roc_auc_score(y_test, baseline_proba)),
+                "baseline_average_precision": float(
+                    average_precision_score(y_test, baseline_proba)
+                ),
+                "classification_at_0_5": classification_report(
+                    y_test, (y_pred_proba > 0.5).astype(int), output_dict=True, zero_division=0
+                ),
+                "threshold": 0.5,
+                "features": self.feature_columns,
+                "feature_statistics_fit_on": "training_rows_only",
+                "brier_score": float(np.mean((y_pred_proba - y_test.to_numpy()) ** 2)),
+            }
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
+            (self.reports_dir / "evaluation.json").write_text(
+                json.dumps(self.metrics, indent=2) + "\n"
+            )
+
             # Log metrics
             if use_mlflow:
                 mlflow.log_param("model_type", self.model_type)
@@ -135,13 +178,13 @@ class FraudModel:
         return predictions
 
     def save_model(self):
-        os.makedirs("models", exist_ok=True)
-        joblib.dump(self.model, "models/fraud_model.pkl")
-        joblib.dump(self.feature_engineer, "models/feature_engineer.pkl")
-        joblib.dump(self.feature_columns, "models/feature_columns.pkl")
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self.model, self.models_dir / "fraud_model.pkl")
+        joblib.dump(self.feature_engineer, self.models_dir / "feature_engineer.pkl")
+        joblib.dump(self.feature_columns, self.models_dir / "feature_columns.pkl")
         logger.info("Model artifacts saved to models/")
 
     def load_model(self):
-        self.model = joblib.load("models/fraud_model.pkl")
-        self.feature_engineer = joblib.load("models/feature_engineer.pkl")
-        self.feature_columns = joblib.load("models/feature_columns.pkl")
+        self.model = joblib.load(self.models_dir / "fraud_model.pkl")
+        self.feature_engineer = joblib.load(self.models_dir / "feature_engineer.pkl")
+        self.feature_columns = joblib.load(self.models_dir / "feature_columns.pkl")

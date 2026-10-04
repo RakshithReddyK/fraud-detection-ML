@@ -28,21 +28,10 @@ class FraudDataGenerator:
         }
         df = pd.DataFrame(data)
 
-        # --- Label generation, deliberately decoupled from the feature set ---
-        # Real fraud is driven mostly by signals we don't expose as model
-        # features (compromised-card lists, device/network graph anomalies,
-        # fraud rings, etc.). To avoid baking a trivial, perfectly-learnable
-        # rule into the labels (label leakage), we:
-        #   1) generate latent/hidden variables that are NEVER added to `df`
-        #      and therefore never seen by the model, and give them the
-        #      dominant weight in the label;
-        #   2) let the observed columns contribute only a weak, noisy signal
-        #      via a logistic link (not hard thresholds a tree can memorize
-        #      one-for-one);
-        #   3) add independent random noise on top.
-        # This keeps the observed features *informative* (a good model should
-        # still beat random guessing) without letting them *determine* the
-        # label, which is what caused unrealistically high AUC before.
+        # Artificial probabilistic labels combine engineered relationships in observed
+        # features with hidden variables and random noise. Observed features are still
+        # intentionally informative; these synthetic metrics do not establish realism
+        # or generalization to actual transactions. Target prevalence is adjusted below.
         latent_fraud_ring = self.rng.choice(
             [0, 1], self.n_samples, p=[1 - self.target_rate, self.target_rate]
         )

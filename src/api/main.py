@@ -6,6 +6,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -15,8 +16,7 @@ import numpy as np
 import pandas as pd
 import redis
 from fastapi import FastAPI, HTTPException
-from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -25,7 +25,14 @@ APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 MODEL_VERSION = os.getenv("MODEL_VERSION", "1.0.0")
 MODELS_DIR = Path(os.getenv("MODELS_DIR", "models"))
 
-app = FastAPI(title="Fraud Detection API", version=APP_VERSION)
+
+@asynccontextmanager
+async def lifespan(app):
+    load_artifacts()
+    yield
+
+
+app = FastAPI(title="Fraud Detection API", version=APP_VERSION, lifespan=lifespan)
 
 # Global state (initialized at startup)
 model = None
@@ -76,13 +83,14 @@ serving_metrics = _ServingMetrics()
 # Schemas (Pydantic v2-safe)
 # --------------------------
 class TransactionRequest(BaseModel):
-    amount: float
-    merchant_risk_score: float
-    days_since_last_transaction: float
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    amount: float = Field(ge=0, le=1e9)
+    merchant_risk_score: float = Field(ge=0, le=1)
+    days_since_last_transaction: float = Field(ge=0, le=1e6)
     hour_of_day: int = Field(ge=0, le=23)
     is_weekend: int = Field(ge=0, le=1)
     num_transactions_today: int = Field(ge=0)
-    location_risk: float
+    location_risk: float = Field(ge=0, le=1)
 
 
 class PredictionResponse(BaseModel):
@@ -123,9 +131,8 @@ def _to_float32(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------
 # Startup
 # --------------------------
-@app.on_event("startup")
 def load_artifacts():
-    global model, feature_engineer, feature_columns, redis_client
+    global model, feature_engineer, feature_columns, redis_client, MODEL_VERSION
 
     try:
         model_path = MODELS_DIR / "fraud_model.pkl"
@@ -144,18 +151,22 @@ def load_artifacts():
         if not isinstance(feature_columns, list) or not feature_columns:
             raise ValueError("feature_columns is invalid or empty.")
 
-        # Redis config (optional)
-        redis_url = os.getenv("REDIS_URL")  # e.g., redis://localhost:6379/0
+        # Fingerprint the complete serving bundle so cached results cannot cross model releases.
+        fingerprint = hashlib.sha256()
+        for path in (model_path, fe_path, cols_path):
+            fingerprint.update(path.read_bytes())
+        MODEL_VERSION = fingerprint.hexdigest()[:16]
+        redis_client = None
+        redis_url = os.getenv("REDIS_URL")
         if redis_url:
-            redis_client = redis.from_url(redis_url, decode_responses=True)
-            redis_client.ping()
-        else:
-            # fallback local
             try:
-                redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-                redis_client.ping()
-            except Exception:
-                redis_client = None
+                candidate = redis.from_url(
+                    redis_url, decode_responses=True, socket_connect_timeout=0.3, socket_timeout=0.3
+                )
+                candidate.ping()
+                redis_client = candidate
+            except redis.RedisError:
+                logger.warning("Cache unavailable; scoring without Redis")
 
         logger.info(
             "Model/FE loaded. features=%d | redis=%s",
@@ -191,8 +202,14 @@ def health_check():
     }
 
 
+@app.get("/ready")
+def readiness():
+    _ensure_model_loaded()
+    return {"status": "ready", "model_version": MODEL_VERSION}
+
+
 @app.post("/predict", response_model=PredictionResponse)
-async def predict_fraud(transaction: TransactionRequest):
+def predict_fraud(transaction: TransactionRequest):
     _ensure_model_loaded()
     start = time.perf_counter()
 
@@ -201,14 +218,16 @@ async def predict_fraud(transaction: TransactionRequest):
     try:
         if redis_client:
             msg = _sorted_json_from_model(transaction)
-            cache_key = "prediction:" + hashlib.md5(msg.encode("utf-8")).hexdigest()
+            cache_key = f"prediction:{MODEL_VERSION}:" + hashlib.sha256(msg.encode()).hexdigest()
             cached = redis_client.get(cache_key)
             if cached:
                 # Validate JSON → model (ensures schema correctness)
                 parsed = PredictionResponse.model_validate_json(cached)
                 latency_ms = (time.perf_counter() - start) * 1000.0
                 serving_metrics.record_prediction(latency_ms, cache_hit=True)
-                return parsed
+                return parsed.model_copy(
+                    update={"latency_ms": latency_ms, "timestamp": _utc_now_iso()}
+                )
     except Exception:
         # Cache errors should not affect prediction path
         cache_key = None
@@ -218,7 +237,7 @@ async def predict_fraud(transaction: TransactionRequest):
     try:
         df_features = feature_engineer.transform(df)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Feature engineering failed: {e}")
+        raise HTTPException(status_code=500, detail="Feature engineering failed") from e
 
     # Ensure all expected columns are present
     missing = [c for c in feature_columns if c not in df_features.columns]
@@ -231,12 +250,12 @@ async def predict_fraud(transaction: TransactionRequest):
     X = df_features[feature_columns]
     X = _to_float32(X)
 
-    # Predict in threadpool (keeps event loop responsive)
+    # Sync route runs in FastAPI's thread pool (including optional Redis I/O)
     try:
-        proba_arr = await run_in_threadpool(model.predict_proba, X)
+        proba_arr = model.predict_proba(X)
         fraud_prob = float(proba_arr[0, 1])
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Model prediction failed: {e}")
+        raise HTTPException(status_code=500, detail="Model prediction failed") from e
 
     latency_ms = (time.perf_counter() - start) * 1000.0
     resp = PredictionResponse(
